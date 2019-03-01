@@ -127,7 +127,7 @@ namespace OraPkgMap
                         cxb.Append($"\n\tif({p.ArgumentName} != default) {{");
                     }
 
-                    cxb.Append($"\n\t{(p.Defaulted ? "\t" : "")}cmd.Parameters.Add(\"{p.ArgumentName}\", OracleDbType.{StringToDbType(p.DataType).ToString()}, {(p.Direction != "OUT" ? $"{p.ArgumentName}, " : "")}ParameterDirection.{StringToDirection(p.Direction).ToString()});");
+                    cxb.Append($"\n\t{(p.Defaulted ? "\t" : "")}cmd.Parameters.Add(new OracleParameter(\"{p.ArgumentName}\", OracleDbType.{StringToDbType(p.DataType).ToString()}, {(p.Direction != "OUT" ? $"{p.ArgumentName}, " : "")}ParameterDirection.{StringToDirection(p.Direction).ToString()}){(p.DataLength.HasValue ? $" {{ Size = {p.DataLength} }}" : string.Empty)});");
 
                     if (p.Defaulted)
                     {
