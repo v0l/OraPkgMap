@@ -20,7 +20,12 @@ namespace OraPkgMap
         private void button1_Click(object sender, EventArgs e)
         {
             var cg = new CodeGen();
-            textBox5.Text = cg.CreateClass(textBox1.Text, textBox2.Text.ToUpper(), textBox3.Text.ToUpper(), textBox4.Text);
+            textBox5.Text = cg.CreateClass(textBox1.Text, textBox2.Text.ToUpper(), textBox3.Text.ToUpper(), textBox4.Text, checkBox1.Checked, checkBox2.Checked);
+        }
+
+        private void checkBox1_CheckedChanged(object sender, EventArgs e)
+        {
+
         }
     }
 }

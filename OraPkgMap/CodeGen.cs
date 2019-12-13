@@ -9,9 +9,11 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using System.Globalization;
 
 namespace OraPkgMap
 {
+
     internal class Args
     {
         public string Owner { get; set; }
@@ -19,6 +21,7 @@ namespace OraPkgMap
         public string PackageName { get; set; }
         public string Overload { get; set; }
         public string ArgumentName { get; set; }
+        public decimal? DataLevel { get; set; }
         public decimal? Position { get; set; }
         public string DataType { get; set; }
         public bool Defaulted { get; set; }
@@ -29,7 +32,9 @@ namespace OraPkgMap
 
     public class CodeGen
     {
-        public string CreateClass(string connection, string owner, string package, string ns)
+        private TextInfo TextInfo { get; } = new CultureInfo("en-US", false).TextInfo;
+
+        public string CreateClass(string connection, string owner, string package, string ns, bool sync, bool async)
         {
             var all_args = new List<Args>();
 
@@ -37,7 +42,7 @@ namespace OraPkgMap
             {
                 conn.Open();
 
-                using (var cmd = new OracleCommand("select owner, object_name, package_name, overload, argument_name, position, data_type, defaulted, in_out, data_length, data_precision from ALL_ARGUMENTS where owner = :owner and package_name = :pkg order by position", conn))
+                using (var cmd = new OracleCommand("select owner, object_name, package_name, overload, argument_name, position, data_level, data_type, defaulted, in_out, data_length, data_precision from ALL_ARGUMENTS where owner = :owner and package_name = :pkg order by position", conn))
                 {
                     cmd.Parameters.Add(":owner", owner);
                     cmd.Parameters.Add(":pkg", package);
@@ -54,11 +59,12 @@ namespace OraPkgMap
                                 Overload = dr[3] as string,
                                 ArgumentName = dr[4] as string,
                                 Position = dr[5] as decimal?,
-                                DataType = dr[6] as string,
-                                Defaulted = (dr[7] as string) == "Y",
-                                Direction = dr[8] as string,
-                                DataLength = dr[9] as decimal?,
-                                DataPrecision = dr[10] as decimal?
+                                DataLevel = dr[6] as decimal?,
+                                DataType = dr[7] as string,
+                                Defaulted = (dr[8] as string) == "Y",
+                                Direction = dr[9] as string,
+                                DataLength = dr[10] as decimal?,
+                                DataPrecision = dr[11] as decimal?
                             };
                             all_args.Add(na);
 
@@ -69,10 +75,10 @@ namespace OraPkgMap
                 conn.Close();
             }
 
-            return CreateClass(ns, all_args);
+            return CreateClass(ns, all_args, sync, async);
         }
 
-        private string CreateClass(string ns, List<Args> args)
+        private string CreateClass(string ns, List<Args> args, bool sync, bool async)
         {
             var genUnit = new CodeCompileUnit();
             var genNamespace = new CodeNamespace(ns);
@@ -80,40 +86,141 @@ namespace OraPkgMap
             genNamespace.Imports.Add(new CodeNamespaceImport("System.Data"));
             genNamespace.Imports.Add(new CodeNamespaceImport("Oracle.ManagedDataAccess.Client"));
             genNamespace.Imports.Add(new CodeNamespaceImport("Oracle.ManagedDataAccess.Types"));
+            if (async)
+            {
+                genNamespace.Imports.Add(new CodeNamespaceImport("System.Threading.Tasks"));
+            }
 
             var genClass = new CodeTypeDeclaration(args.First().PackageName);
             genClass.IsClass = true;
             genClass.TypeAttributes = TypeAttributes.Public;
             genNamespace.Types.Add(genClass);
-            genUnit.Namespaces.Add(genNamespace);
+
 
             foreach (var ag in args.GroupBy(a => $"{a.ObjectName}_{a.Overload}"))
             {
-                var nm = new CodeMemberMethod();
-                nm.Attributes = MemberAttributes.Public | MemberAttributes.Static;
-                nm.Name = ag.First().ObjectName;
-                var hasReturn = ag.Any(a => a.Direction == "OUT" && string.IsNullOrEmpty(a.ArgumentName));
-                var returnArg = ag.FirstOrDefault(a => a.Direction == "OUT" && string.IsNullOrEmpty(a.ArgumentName));
-                if (hasReturn)
+                if (sync)
                 {
-                    nm.ReturnType = OracleTypeToCodeRefType(returnArg.DataType);
+                    genClass.Members.Add(MakeMethod(ag.ToList(), sync && async));
+                }
+                if (async)
+                {
+                    var needsOutClass = ag.Where(a => a.Direction == "OUT");
+                    if (needsOutClass.Count() > 1)
+                    {
+                        genNamespace.Types.Add(MakeOutClass(needsOutClass));
+                    }
+                    genClass.Members.Add(MakeMethod(ag.ToList(), sync && async, async));
+                }
+            }
+
+            genUnit.Namespaces.Add(genNamespace);
+            
+            var cp = CodeDomProvider.CreateProvider("CSharp");
+            using (var ms = new MemoryStream())
+            {
+                using (var sw = new StreamWriter(ms))
+                {
+                    cp.GenerateCodeFromCompileUnit(genUnit, sw, new CodeGeneratorOptions()
+                    {
+                        BracingStyle = "C"
+                    });
+                    sw.Flush();
+                }
+                return Encoding.UTF8.GetString(ms.ToArray());
+            }
+        }
+
+        private CodeTypeDeclaration MakeOutClass(IEnumerable<Args> args)
+        {
+            var genClass = new CodeTypeDeclaration($"{args.First().ObjectName}OUT");
+            genClass.IsClass = true;
+            genClass.TypeAttributes = TypeAttributes.Public;
+
+            foreach (var arg in args)
+            {
+                var nm = new CodeMemberField();
+                nm.Attributes = MemberAttributes.Public | MemberAttributes.Final;
+                nm.Name = arg.ArgumentName ?? "RETURN";
+                nm.Type = OracleTypeToCodeRefType(arg.DataType, false);
+
+                genClass.Members.Add(nm);
+            }
+
+            return genClass;
+        }
+
+
+        private CodeMemberMethod MakeMethod(List<Args> ag, bool hasBoth, bool async = false)
+        {
+            var nm = new CodeMemberMethod();
+            nm.Attributes = MemberAttributes.Public | MemberAttributes.Static;
+
+            if (hasBoth && async)
+            {
+                nm.Name = $"{ag.First().ObjectName}ASYNC";
+            }
+            else
+            {
+                nm.Name = ag.First().ObjectName;
+            }
+            var outArgs = ag.Where(a => a.Direction == "OUT");
+            var hasReturn = ag.Any(a => a.Direction == "OUT" && string.IsNullOrEmpty(a.ArgumentName));
+            var outAsReturn = outArgs.Count() == 1 && !hasReturn;
+            var returnArg = ag.FirstOrDefault(a => a.Direction == "OUT" && string.IsNullOrEmpty(a.ArgumentName)) ?? ag.FirstOrDefault(a => a.Direction == "OUT");
+            var canGenForManaged = ag.All(a => a.DataLevel == 0);
+            var allArgs = ag.OrderBy(a => a.Defaulted).Where(a => !string.IsNullOrEmpty(a.ArgumentName) && a.DataLevel == 0);
+
+            if (hasReturn || outAsReturn)
+            {
+                if (outArgs.Count() > 1 && async)
+                {
+                    nm.ReturnType = new CodeTypeReference($"async Task<{ag.First().ObjectName}OUT>");
+                }
+                else
+                {
+                    nm.ReturnType = OracleTypeToCodeRefType(returnArg.DataType, async);
+                }
+            }
+            else
+            {
+                if (async)
+                {
+                    if (outArgs.Count() > 1)
+                    {
+                        nm.ReturnType = new CodeTypeReference($"async Task<{ag.First().ObjectName}OUT>");
+                    }
+                    else
+                    {
+                        nm.ReturnType = new CodeTypeReference("async Task");
+                    }
                 }
                 else
                 {
                     nm.ReturnType = new CodeTypeReference(typeof(void));
                 }
+            }
 
-                var con_in = new CodeParameterDeclarationExpression("OracleConnection", "con");
-                nm.Parameters.Add(con_in);
+            var con_in = new CodeParameterDeclarationExpression("OracleConnection", "con");
+            nm.Parameters.Add(con_in);
 
-                foreach (var p in ag.OrderBy(a => a.Defaulted).Where(a => !string.IsNullOrEmpty(a.ArgumentName)))
+            foreach (var p in allArgs)
+            {
+                if ((!async && ((outAsReturn && p.Direction == "IN") || !outAsReturn)) || (async && p.Direction == "IN"))
                 {
-                    var argref = new CodeParameterDeclarationExpression(OracleTypeToCodeRefType(p.DataType), $"{p.ArgumentName}{(p.Defaulted ? " = default" : string.Empty)}");
+                    var argref = new CodeParameterDeclarationExpression(OracleTypeToCodeRefType(p.DataType, false), $"{p.ArgumentName}{(p.Defaulted ? " = default" : string.Empty)}");
                     argref.Direction = StringToFieldDirection(p.Direction);
                     nm.Parameters.Add(argref);
                 }
+            }
 
-                var cxb = new StringBuilder();
+            var cxb = new StringBuilder();
+            if (canGenForManaged)
+            {
+                if (async && outArgs.Count() > 1)
+                {
+                    cxb.Append($"var ret = new {ag.First().ObjectName}OUT();\n");
+                }
                 cxb.Append($"using(var cmd = new OracleCommand(\"{ag.First().Owner}.{ag.First().PackageName}.{ag.First().ObjectName}\", con)) {{");
                 cxb.Append("\n\tcmd.CommandType = CommandType.StoredProcedure;\n\tcmd.BindByName = true;");
                 if (hasReturn)
@@ -135,37 +242,60 @@ namespace OraPkgMap
                     }
                 }
 
-                cxb.Append("\n\tcmd.ExecuteNonQuery();");
+                if (async)
+                {
+                    cxb.Append("\n\tawait cmd.ExecuteNonQueryAsync();");
+                }
+                else
+                {
+                    cxb.Append("\n\tcmd.ExecuteNonQuery();");
+                }
 
                 foreach (var p in ag.OrderBy(a => a.Position).Where(a => (a.Direction == "OUT" || a.Direction == "IN_OUT") && !string.IsNullOrEmpty(a.ArgumentName)))
                 {
-                    cxb.Append($"\n\tif(!(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value).IsNull) {{\r\n\t\t{p.ArgumentName} = ({OracletypeToCastStringType(p.DataType)})(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value);\r\n\t}}\r\n\telse {{\r\n\t\t{p.ArgumentName} = null;\r\n\t}}");
+                    if (async && outArgs.Count() > 1)
+                    {
+                        cxb.Append($"\n\tif(!(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value).IsNull) {{\r\n\t\tret.{p.ArgumentName} = ({OracletypeToCastStringType(p.DataType)})(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value);\r\n\t}}\r\n\telse {{\r\n\t\tret.{p.ArgumentName} = null;\r\n\t}}");
+                    }
+                    else
+                    {
+                        if (outAsReturn)
+                        {
+                            cxb.Append($"\n\tif(!(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value).IsNull) {{\r\n\t\treturn ({OracletypeToCastStringType(p.DataType)})(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value);\r\n\t}}\r\n\telse {{\r\n\t\treturn default;\r\n\t}}");
+                        }
+                        else
+                        {
+                            cxb.Append($"\n\tif(!(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value).IsNull) {{\r\n\t\t{p.ArgumentName} = ({OracletypeToCastStringType(p.DataType)})(({StringToOracleType(p.DataType)})cmd.Parameters[\"{p.ArgumentName}\"].Value);\r\n\t}}\r\n\telse {{\r\n\t\t{p.ArgumentName} = null;\r\n\t}}");
+                        }
+                    }
                 }
 
                 if (hasReturn)
                 {
-                    cxb.Append($"\n\treturn cmd.Parameters[\"Return_Value\"].Value != DBNull.Value ? ({OracletypeToCastStringType(returnArg.DataType)})(({StringToOracleType(returnArg.DataType)})cmd.Parameters[\"Return_Value\"].Value) : default;");
+                    if (async && outArgs.Count() > 1)
+                    {
+                        cxb.Append($"\n\tret.RETURN = cmd.Parameters[\"Return_Value\"].Value != DBNull.Value ? ({OracletypeToCastStringType(returnArg.DataType)})(({StringToOracleType(returnArg.DataType)})cmd.Parameters[\"Return_Value\"].Value) : default;");
+                    }
+                    else
+                    {
+                        cxb.Append($"\n\treturn cmd.Parameters[\"Return_Value\"].Value != DBNull.Value ? ({OracletypeToCastStringType(returnArg.DataType)})(({StringToOracleType(returnArg.DataType)})cmd.Parameters[\"Return_Value\"].Value) : default;");
+                    }
                 }
                 cxb.Append("\n\t}");
-
-                var cx = new CodeSnippetStatement(cxb.ToString());
-                nm.Statements.Add(cx);
-                genClass.Members.Add(nm);
-            }
-
-            var cp = CodeDomProvider.CreateProvider("CSharp");
-            using (var ms = new MemoryStream())
-            {
-                using (var sw = new StreamWriter(ms))
+                if (async && outArgs.Count() > 1)
                 {
-                    cp.GenerateCodeFromCompileUnit(genUnit, sw, new CodeGeneratorOptions()
-                    {
-                        BracingStyle = "C"
-                    });
-                    sw.Flush();
+                    cxb.Append("\n\treturn ret;");
                 }
-                return Encoding.UTF8.GetString(ms.ToArray());
             }
+            else
+            {
+                cxb.Append($"\t/// UDT classes are not supported in the managed driver\n\tthrow new NotImplementedException();");
+            }
+
+            var cx = new CodeSnippetStatement(cxb.ToString());
+            nm.Statements.Add(cx);
+
+            return nm;
         }
 
         private string StringToOracleType(string x)
@@ -178,6 +308,7 @@ namespace OraPkgMap
                     return "OracleDecimal";
                 case "VARCHAR2":
                 case "CHAR":
+                case "CLOB":
                     return "OracleString";
                 case "DATE":
                     return "OracleDate";
@@ -195,6 +326,7 @@ namespace OraPkgMap
                 case "NUMBER":
                     return OracleDbType.Decimal;
                 case "VARCHAR2":
+                case "CLOB":
                     return OracleDbType.Varchar2;
                 case "DATE":
                     return OracleDbType.Date;
@@ -204,27 +336,33 @@ namespace OraPkgMap
                     return OracleDbType.Long;
                 case "PL/SQL BOOLEAN":
                     return OracleDbType.Boolean;
+                case "PL/SQL RECORD":
+                    return OracleDbType.Raw;
+                default:
+                    return (OracleDbType)Enum.Parse(typeof(OracleDbType), x);
             }
-            return OracleDbType.Raw;
         }
 
-        private CodeTypeReference OracleTypeToCodeRefType(string dbt)
+        private CodeTypeReference OracleTypeToCodeRefType(string dbt, bool async)
         {
             switch (dbt)
             {
                 case "ROWID":
                 case "NUMBER":
-                    return new CodeTypeReference("decimal?");
+                    return new CodeTypeReference(async ? "async Task<decimal?>" : "decimal?");
                 case "VARCHAR2":
-                    return new CodeTypeReference(typeof(string));
+                case "CLOB":
+                    return async ? new CodeTypeReference("async Task<string>") : new CodeTypeReference(typeof(string));
                 case "DATE":
-                    return new CodeTypeReference("DateTime?");
+                    return new CodeTypeReference(async ? "async Task<DateTime?>" : "DateTime?");
                 case "CHAR":
-                    return new CodeTypeReference(typeof(char));
+                    return async ? new CodeTypeReference("async Task<char>") : new CodeTypeReference(typeof(char));
                 case "LONG":
-                    return new CodeTypeReference("long?");
+                    return new CodeTypeReference(async ? "async Task<long?>" : "long?");
                 case "PL/SQL BOOLEAN":
-                    return new CodeTypeReference("bool?");
+                    return new CodeTypeReference(async ? "async Task<bool?>" : "bool?");
+                case "PL/SQL RECORD":
+                    return async ? new CodeTypeReference("async Task<object>") : new CodeTypeReference(typeof(object));
             }
             return new CodeTypeReference("??");
         }
@@ -237,6 +375,7 @@ namespace OraPkgMap
                 case "NUMBER":
                     return "decimal?";
                 case "VARCHAR2":
+                case "CLOB":
                     return "string";
                 case "DATE":
                     return "DateTime?";
