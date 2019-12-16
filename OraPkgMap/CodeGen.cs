@@ -10,6 +10,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Globalization;
+using Oracle.ManagedDataAccess.Types;
 
 namespace OraPkgMap
 {
@@ -314,6 +315,8 @@ namespace OraPkgMap
                     return "OracleDate";
                 case "PL/SQL BOOLEAN":
                     return "OracleBoolean";
+                case "REF CURSOR":
+                    return "OracleRefCursor";
             }
             return "object";
         }
@@ -338,6 +341,8 @@ namespace OraPkgMap
                     return OracleDbType.Boolean;
                 case "PL/SQL RECORD":
                     return OracleDbType.Raw;
+                case "REF CURSOR":
+                    return OracleDbType.RefCursor;
                 default:
                     return (OracleDbType)Enum.Parse(typeof(OracleDbType), x);
             }
@@ -363,6 +368,8 @@ namespace OraPkgMap
                     return new CodeTypeReference(async ? "async Task<bool?>" : "bool?");
                 case "PL/SQL RECORD":
                     return async ? new CodeTypeReference("async Task<object>") : new CodeTypeReference(typeof(object));
+                case "REF CURSOR":
+                    return async ? new CodeTypeReference("async Task<OracleRefCursor>") : new CodeTypeReference(typeof(OracleRefCursor));
             }
             return new CodeTypeReference("??");
         }
@@ -385,6 +392,8 @@ namespace OraPkgMap
                     return "long?";
                 case "PL/SQL BOOLEAN":
                     return "bool?";
+                case "REF CURSOR":
+                    return "OracleRefCursor";
             }
             return "object";
         }
